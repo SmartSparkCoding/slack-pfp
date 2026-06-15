@@ -23,6 +23,13 @@ EMOJI_CACHE_PATH = os.path.join(BASE_DIR, "emoji_cache.json")
 
 LASTFM_API_URL = "http://ws.audioscrobbler.com/2.0/"
 
+# Keyless cover-art fallback providers (Last.fm is missing art for many albums).
+DEEZER_ALBUM_SEARCH = "https://api.deezer.com/search/album"
+DEEZER_TRACK_SEARCH = "https://api.deezer.com/search/track"
+ITUNES_SEARCH = "https://itunes.apple.com/search"
+# Last.fm serves this md5 "star" image when an album has no cover — treat as missing.
+LASTFM_PLACEHOLDER = "2a96cbd8b46e442fc41c2b86b821562f"
+
 # Cachet: a cache/proxy for Hack Club Slack profile pictures and custom emojis.
 CACHET_BASE = "https://cachet.dunkirk.sh"
 
@@ -41,6 +48,9 @@ EMOJI_FONT_CANDIDATES = [
 DEFAULT_CONFIG = {
     "poll_interval": 5,
     "restore_delay": 30,
+    # Optional per-user base profile photo (relative path under uploads/). When
+    # empty we fall back to the user's captured Slack avatar / bundled default.
+    "base_photo": "",
     "frame_enabled": True,
     # Placement of the framed album-art badge on the profile photo. Editable
     # from the dashboard's "Edit / move" album editor. ``album_scale`` is the
@@ -239,6 +249,20 @@ def ensure_base_pfp(avatar_url: str, uid: str = "") -> str:
         return DEFAULT_PFP_PATH
 
 
+def resolve_base_path(cfg: dict, state: dict, uid: str = "") -> str:
+    """Resolve the base profile photo to a local file path.
+
+    Prefers a user-uploaded base photo (``cfg['base_photo']``) when present,
+    otherwise falls back to their captured Slack avatar / bundled default.
+    """
+    bp = (cfg or {}).get("base_photo", "")
+    if bp:
+        path = os.path.join(BASE_DIR, bp)
+        if os.path.exists(path):
+            return path
+    return ensure_base_pfp((state or {}).get("slack_avatar_url", ""), uid)
+
+
 def fetch_slack_emoji(name: str, dest_dir: str, token: str = "") -> str:
     """Download a Slack custom emoji and save it as an overlay image.
 
@@ -345,21 +369,46 @@ def save_overlay_upload(stream, dest_dir: str, basename: str, max_size: int = 51
     return fname
 
 
+SLACK_PHOTO_MAX_BYTES = 512 * 1024  # Slack users.setPhoto hard limit
+
+
 def prepare_image_for_slack(img: Image.Image, max_size: int = 512) -> BytesIO:
-    """Resize/encode to a PNG under Slack's 512KB limit."""
+    """Resize/encode the profile photo to fit under Slack's 512KB limit.
+
+    PNG is tried first (crisp for simple/flat images), but a 512px photographic
+    image easily blows past 512KB as a lossless PNG. Profile photos render
+    opaque, so we fall back to JPEG (flattened on white) at decreasing quality,
+    then shrink dimensions, until the result fits — this always returns an
+    uploadable image instead of failing.
+    """
     if img.width > max_size or img.height > max_size:
         img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
-    out = BytesIO()
-    img.convert("RGBA").save(out, format="PNG", optimize=True)
-    out.seek(0)
-    if out.getbuffer().nbytes > 512 * 1024:
-        # Fall back to RGB if the RGBA PNG is too heavy.
+
+    # 1) PNG (RGBA then RGB) — best for flat/simple graphics.
+    for mode in ("RGBA", "RGB"):
         out = BytesIO()
-        img.convert("RGB").save(out, format="PNG", optimize=True)
-        out.seek(0)
-        if out.getbuffer().nbytes > 512 * 1024:
-            raise ValueError(f"Image too large: {out.getbuffer().nbytes} bytes")
-    return out
+        img.convert(mode).save(out, format="PNG", optimize=True)
+        if out.getbuffer().nbytes <= SLACK_PHOTO_MAX_BYTES:
+            out.seek(0)
+            return out
+
+    # 2) JPEG fallback for photographic images (no transparency needed).
+    flat = Image.new("RGB", img.size, (255, 255, 255))
+    rgba = img.convert("RGBA")
+    flat.paste(rgba, (0, 0), rgba)
+    work = flat
+    while True:
+        for quality in (90, 80, 70, 60, 50):
+            out = BytesIO()
+            work.save(out, format="JPEG", quality=quality, optimize=True)
+            if out.getbuffer().nbytes <= SLACK_PHOTO_MAX_BYTES:
+                out.seek(0)
+                return out
+        # Still too big even at low quality: halve the dimensions and retry.
+        if min(work.size) <= 64:
+            out.seek(0)
+            return out  # give Slack our smallest attempt rather than failing
+        work = work.resize((work.width // 2, work.height // 2), Image.Resampling.LANCZOS)
 
 
 # --------------------------------------------------------------------------- #
@@ -532,6 +581,76 @@ def create_profile_image(base_img: Image.Image, album_img: Image.Image,
 # Last.fm
 # --------------------------------------------------------------------------- #
 
+# In-memory cover-art cache (incl. negative results) keyed by artist/album/song.
+_album_art_cache: dict[tuple, str] = {}
+
+
+def best_lastfm_image(images: list) -> str:
+    """Pick the largest usable Last.fm cover URL, skipping the star placeholder."""
+    url = ""
+    for image in images or []:
+        text = image.get("#text") or ""
+        if text and LASTFM_PLACEHOLDER not in text:
+            url = text  # images are ordered small→large, keep the last good one
+    return url
+
+
+def _deezer_art(artist: str, album: str, song: str) -> str:
+    try:
+        if album:
+            resp = requests.get(DEEZER_ALBUM_SEARCH,
+                                params={"q": f'artist:"{artist}" album:"{album}"'}, timeout=8)
+            data = resp.json().get("data", [])
+            if data:
+                return data[0].get("cover_xl") or data[0].get("cover_big") or ""
+        # No album (or no album hit) — a track search still carries the album cover.
+        q = f'artist:"{artist}" track:"{song}"' if song else f'artist:"{artist}"'
+        resp = requests.get(DEEZER_TRACK_SEARCH, params={"q": q}, timeout=8)
+        data = resp.json().get("data", [])
+        if data:
+            alb = data[0].get("album", {})
+            return alb.get("cover_xl") or alb.get("cover_big") or ""
+    except Exception as e:
+        print(f"Deezer art lookup failed: {e}")
+    return ""
+
+
+def _itunes_art(artist: str, album: str, song: str) -> str:
+    try:
+        term = f"{artist} {album}".strip() if album else f"{artist} {song}".strip()
+        entity = "album" if album else "song"
+        resp = requests.get(ITUNES_SEARCH,
+                            params={"term": term, "entity": entity, "limit": 1}, timeout=8)
+        results = resp.json().get("results", [])
+        if results:
+            art = results[0].get("artworkUrl100", "")
+            if art:  # bump the requested size; no-op if the token isn't present
+                return art.replace("100x100bb", "600x600bb")
+    except Exception as e:
+        print(f"iTunes art lookup failed: {e}")
+    return ""
+
+
+def fetch_album_art(artist: str, album: str = "", song: str = "") -> str:
+    """Find cover art from keyless providers (Deezer, then iTunes).
+
+    Fallback for when Last.fm has no usable image. Results — including misses —
+    are cached in memory by artist/album/song so we never look up the same
+    track twice.
+    """
+    artist = (artist or "").strip()
+    album = (album or "").strip()
+    song = (song or "").strip()
+    if not artist or (not album and not song):
+        return ""
+    key = (artist.lower(), album.lower(), "" if album else song.lower())
+    if key in _album_art_cache:
+        return _album_art_cache[key]
+    url = _deezer_art(artist, album, song) or _itunes_art(artist, album, song)
+    _album_art_cache[key] = url
+    return url
+
+
 def validate_lastfm_user(api_key: str, username: str) -> dict:
     """Check a Last.fm username for onboarding.
 
@@ -572,7 +691,17 @@ def validate_lastfm_user(api_key: str, username: str) -> dict:
         t = tracks[0]
         artist = t.get("artist", {}).get("#text", "")
         song = t.get("name", "")
-        return {"status": "ok", "track": f"{song} — {artist}".strip(" —")}
+        album = t.get("album", {}).get("#text", "")
+        album_art = best_lastfm_image(t.get("image", []))
+        if not album_art:
+            album_art = fetch_album_art(artist, album, song)
+        nowplaying = t.get("@attr", {}).get("nowplaying") == "true"
+        return {
+            "status": "ok",
+            "track": f"{song} — {artist}".strip(" —"),
+            "song": song, "artist": artist, "album": album,
+            "album_art": album_art, "nowplaying": nowplaying,
+        }
     except Exception as e:
         print(f"Last.fm validate error: {e}")
         return {"status": "error", "track": ""}
@@ -602,11 +731,10 @@ def get_current_track(api_key: str, username: str) -> tuple:
         song = track.get("name")
         artist = track.get("artist", {}).get("#text")
         album = track.get("album", {}).get("#text", "")
-        album_art = None
-        for image in track.get("image", []):
-            if image.get("#text"):
-                album_art = image["#text"]
-        return f"{artist} - {song}", song, artist, album, album_art
+        album_art = best_lastfm_image(track.get("image", []))
+        if not album_art:
+            album_art = fetch_album_art(artist, album, song)
+        return f"{artist} - {song}", song, artist, album, album_art or None
     except Exception as e:
         print(f"Last.fm API error: {e}")
     return None, None, None, None, None

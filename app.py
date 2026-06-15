@@ -54,7 +54,11 @@ def current_user() -> db.User | None:
     if "user" in g:
         return g.user
     uid = session.get("slack_user_id")
-    g.user = db.load_user(uid) if uid else None
+    user = db.load_user(uid) if uid else None
+    if user is not None:
+        # Overlay the live now-playing state the worker keeps in RAM (tmpfs).
+        user.state.update(db.load_runtime_state(uid))
+    g.user = user
     return g.user
 
 
@@ -211,11 +215,36 @@ def logout():
 # Onboarding (Last.fm step)
 # --------------------------------------------------------------------------- #
 
+def _birthday_mmdd(user: db.User) -> str:
+    for h in user.config.get("holidays", []):
+        if h.get("id") == "birthday":
+            return h.get("start", "")
+    return ""
+
+
+def _set_birthday(user: db.User, mmdd: str) -> bool:
+    """Update the birthday holiday's dates from a 'MM-DD' string. Returns True if set."""
+    parts = (mmdd or "").split("-")
+    if len(parts) != 2 or not all(p.isdigit() for p in parts):
+        return False
+    mm, dd = int(parts[0]), int(parts[1])
+    if not (1 <= mm <= 12 and 1 <= dd <= 31):
+        return False
+    norm = f"{mm:02d}-{dd:02d}"
+    for h in user.config.get("holidays", []):
+        if h.get("id") == "birthday":
+            h["start"] = h["end"] = norm
+            h["enabled"] = True
+            return True
+    return False
+
+
 @app.route("/onboarding")
 @login_required
 def onboarding():
     user = current_user()
-    return render_template("onboarding.html", user=user)
+    return render_template("onboarding.html", user=user,
+                           birthday=_birthday_mmdd(user))
 
 
 @app.route("/api/lastfm/validate")
@@ -227,6 +256,33 @@ def lastfm_validate():
     return jsonify(core.validate_lastfm_user(LASTFM_API_KEY, username))
 
 
+@app.route("/onboarding/preview.png")
+@login_required
+def onboarding_preview():
+    """Render the user's real profile photo (their avatar + frame + the album
+    art of the typed Last.fm user's recent track) so they see it before going
+    live. Falls back to just the base photo when nothing can be fetched."""
+    user = current_user()
+    username = request.args.get("username", "").strip()
+    cfg = user.config
+    base_path = core.resolve_base_path(cfg, user.state, user.slack_user_id)
+    base = core.build_base_image(cfg, base_path)
+    if username and LASTFM_API_KEY and cfg.get("frame_enabled", True):
+        info = core.validate_lastfm_user(LASTFM_API_KEY, username)
+        art = info.get("album_art")
+        if art:
+            try:
+                album = core.download_image(art)
+                base = core.create_profile_image(base, album, FRAME_PATH, cfg)
+            except Exception:
+                pass
+    out = BytesIO()
+    base.convert("RGB").save(out, format="PNG")
+    out.seek(0)
+    return Response(out.read(), mimetype="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.route("/onboarding/lastfm", methods=["POST"])
 @login_required
 def onboarding_lastfm():
@@ -236,6 +292,10 @@ def onboarding_lastfm():
         flash("Enter your Last.fm username.")
         return redirect(url_for("onboarding"))
     user.lastfm_username = username
+    # Birthday (from a date input, YYYY-MM-DD) configures the birthday overlay.
+    bday = request.form.get("birthday", "").strip()
+    if bday:
+        _set_birthday(user, bday[5:] if len(bday) >= 10 else bday)
     go_live = request.form.get("go_live") == "on"
     user.onboarding = "active" if go_live else "lastfm_set"
     save(user)
@@ -280,6 +340,41 @@ def update_settings():
 
 
 # --------------------------------------------------------------------------- #
+# Base profile photo (user-supplied; overrides their Slack avatar)
+# --------------------------------------------------------------------------- #
+
+@app.route("/api/photo", methods=["POST"])
+@login_required
+def update_photo():
+    user = current_user()
+    upload = request.files.get("photo")
+    if not upload or not upload.filename:
+        flash("Choose an image to upload.")
+        return redirect(url_for("dashboard"))
+    saved = _save_upload(user, upload.stream, upload.filename, "base")
+    if saved is False:
+        flash("Unsupported or invalid image (use PNG/GIF/WebP/JPEG)")
+        return redirect(url_for("dashboard"))
+    user.config["base_photo"] = saved
+    save(user)
+    flash("Profile photo updated")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/api/photo/reset", methods=["POST"])
+@login_required
+def reset_photo():
+    user = current_user()
+    bp = user.config.get("base_photo", "")
+    if bp:
+        _delete_item_image(user.slack_user_id, {"image": bp})
+    user.config["base_photo"] = ""
+    save(user)
+    flash("Profile photo reset to your Slack avatar")
+    return redirect(url_for("dashboard"))
+
+
+# --------------------------------------------------------------------------- #
 # Account
 # --------------------------------------------------------------------------- #
 
@@ -311,6 +406,7 @@ def account_disconnect():
     user.slack_token = ""
     user.onboarding = "disconnected"
     save(user)
+    db.delete_runtime_state(user.slack_user_id)
     session.clear()
     flash("Disconnected from Slack.")
     return redirect(url_for("index"))
@@ -587,7 +683,7 @@ def refresh_emojis():
 def preview():
     user = current_user()
     cfg, state = user.config, user.state
-    base_path = core.ensure_base_pfp(state.get("slack_avatar_url", ""), user.slack_user_id)
+    base_path = core.resolve_base_path(cfg, state, user.slack_user_id)
     base = core.build_base_image(cfg, base_path)
     album_url = state.get("album_art")
     if album_url and cfg.get("frame_enabled", True):
@@ -607,7 +703,7 @@ def preview():
 @login_required
 def base_png():
     user = current_user()
-    base_path = core.ensure_base_pfp(user.state.get("slack_avatar_url", ""), user.slack_user_id)
+    base_path = core.resolve_base_path(user.config, user.state, user.slack_user_id)
     img = core.load_local_image(base_path)
     out = BytesIO()
     img.save(out, format="PNG")

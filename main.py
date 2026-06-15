@@ -84,8 +84,7 @@ def set_status(client, text, emoji):
 
 def set_photo(client, user, album_url):
     cfg = user.config
-    base_path = core.ensure_base_pfp(
-        user.state.get("slack_avatar_url", ""), user.slack_user_id)
+    base_path = core.resolve_base_path(cfg, user.state, user.slack_user_id)
     base_img = core.build_base_image(cfg, base_path)
     if album_url and cfg.get("frame_enabled", True):
         album_img = core.download_image(album_url)
@@ -107,7 +106,8 @@ def write_state(user, playing, song, artist, album, album_art, lastfm_status="")
         "active_holidays": [h["id"] for h in core.active_holidays(user.config)],
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
-    db.save_user(user)
+    # Volatile now-playing state goes to RAM (tmpfs), not the SD card.
+    db.save_runtime_state(user.slack_user_id, user.state)
 
 
 def process_user(user: db.User, api_key: str):
@@ -160,6 +160,7 @@ def process_user(user: db.User, api_key: str):
             user.onboarding = "disconnected"
             user.state["lastfm_status"] = "slack_disconnected"
             db.save_user(user)
+            db.delete_runtime_state(user.slack_user_id)  # drop stale now-playing
             print(f"[{user.slack_user_id}] disabled (token revoked)")
         return False
 

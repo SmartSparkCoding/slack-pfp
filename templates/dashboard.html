@@ -91,6 +91,28 @@
     <!-- Right: controls -->
     <div>
       <div class="card">
+        <h2>Profile photo</h2>
+        <div class="meta" style="margin:-8px 0 14px;">The base photo your album art gets framed onto. Defaults to your Slack avatar.</div>
+        <div style="display:flex; gap:14px; align-items:center;">
+          <img src="{{ url_for('base_png') }}?t={{ state.updated_at or '' }}" alt="base photo"
+               style="width:84px; height:84px; border-radius:12px; object-fit:cover; background:#11131a; flex:none;">
+          <div style="flex:1;">
+            <form method="post" action="{{ url_for('update_photo') }}" enctype="multipart/form-data">
+              <input type="file" name="photo" accept=".png,.gif,.webp,.jpg,.jpeg" required>
+              <div style="display:flex; gap:8px; margin-top:10px;">
+                <button type="submit">Upload photo</button>
+              </div>
+            </form>
+            {% if cfg.base_photo %}
+            <form method="post" action="{{ url_for('reset_photo') }}" style="margin-top:8px;">
+              <button class="ghost" type="submit">Reset to Slack avatar</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
         <h2>Settings</h2>
         <form method="post" action="{{ url_for('update_settings') }}">
           <div class="switch" style="justify-content:space-between;">

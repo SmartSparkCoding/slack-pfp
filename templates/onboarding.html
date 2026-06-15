@@ -9,59 +9,142 @@
     * { box-sizing: border-box; }
     body { margin: 0; font-family: system-ui, sans-serif; background: #0f1117; color: #e6e8ee;
            display: grid; place-items: center; min-height: 100vh; padding: 24px; }
-    .card { background: #1a1d27; padding: 36px; border-radius: 18px; width: min(460px, 95vw);
+    .card { background: #1a1d27; padding: 36px; border-radius: 20px; width: min(880px, 96vw);
             box-shadow: 0 10px 40px rgba(0,0,0,.4); }
-    h1 { margin: 0 0 6px; font-size: 1.3rem; }
-    p.sub { margin: 0 0 22px; color: #8b90a0; font-size: .9rem; line-height: 1.5; }
     .steps { display:flex; gap:6px; margin-bottom:22px; }
     .steps span { flex:1; height:4px; border-radius:2px; background:#232838; }
     .steps span.done { background:#4f7cff; }
+    h1 { margin: 0 0 6px; font-size: 1.4rem; }
+    p.sub { margin: 0 0 24px; color: #8b90a0; font-size: .92rem; line-height: 1.5; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 28px; align-items: start; }
+    @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+
+    /* Faux Slack profile preview */
+    .preview-wrap { background:#11131a; border:1px solid #232838; border-radius:16px; padding:22px; }
+    .preview-label { font-size:.72rem; text-transform:uppercase; letter-spacing:.06em;
+                     color:#8b90a0; margin:0 0 14px; }
+    .pfp { width:100%; aspect-ratio:1; border-radius:18px; background:#0c0e14; display:block;
+           object-fit:cover; transition:opacity .2s; }
+    .pfp.loading { opacity:.45; }
+    .profile-row { display:flex; align-items:center; gap:12px; margin-top:16px; }
+    .pfp-mini { width:40px; height:40px; border-radius:9px; object-fit:cover; background:#0c0e14; flex:none; }
+    .pname { font-weight:700; font-size:.98rem; }
+    .pbadge { display:inline-block; width:8px; height:8px; border-radius:50%; background:#2bac76;
+              margin-left:6px; vertical-align:middle; }
+    .pstatus { margin-top:10px; font-size:.9rem; color:#cdd2e0; display:flex; align-items:center;
+               gap:7px; min-height:1.3em; }
+    .pstatus .emoji { font-size:1.05rem; }
+    .pstatus.idle { color:#8b90a0; }
+
     label { display: block; font-size: .82rem; color: #b8bdcc; margin: 14px 0 6px; }
     input[type=text] { width: 100%; padding: 11px 12px; border-radius: 10px; border: 1px solid #2b2f3d;
             background: #11131a; color: #e6e8ee; font-size: .95rem; }
     .result { font-size: .85rem; margin-top: 10px; min-height: 1.2em; }
     .ok { color: #6ee7a0; } .warn { color: #f3c969; } .err { color: #ff9aa8; }
     .result a { color: #8fb0ff; }
-    .switch { display: flex; align-items: center; gap: 10px; margin: 20px 0; font-size: .9rem; }
+    .switch { display: flex; align-items: center; gap: 10px; margin: 20px 0 6px; font-size: .9rem; }
     .switch input { width: 18px; height: 18px; accent-color: #4f7cff; }
-    button { width: 100%; margin-top: 12px; padding: 12px; border: none; border-radius: 11px;
+    button { width: 100%; margin-top: 14px; padding: 12px; border: none; border-radius: 11px;
              background: #4f7cff; color: #fff; font-weight: 600; cursor: pointer; font-size: .95rem; }
     button:hover { background: #3d68ec; }
     .flash { background: #14331f; color: #7fe0a3; padding: 10px 12px; border-radius: 10px;
              font-size: .85rem; margin-bottom: 14px; }
+    .next { margin: 22px 0 0; padding: 0; list-style: none; font-size: .82rem; color: #8b90a0; }
+    .next li { padding: 4px 0 4px 22px; position: relative; line-height: 1.4; }
+    .next li::before { content: "→"; position: absolute; left: 0; color: #4f7cff; }
   </style>
 </head>
 <body>
-  <form class="card" method="post" action="{{ url_for('onboarding_lastfm') }}">
+  <div class="card">
     <div class="steps"><span class="done"></span><span class="done"></span><span></span></div>
-    <h1>Connect your Last.fm</h1>
-    <p class="sub">Signed in to Slack ✓. Now tell us your Last.fm username so we can read
-      your now-playing track. Your recent scrobbles must be <strong>public</strong>.</p>
+    <h1>You're almost live 🎶</h1>
+    <p class="sub">Signed in to Slack ✓. Enter your Last.fm username and watch your new
+      profile come together on the right — that's exactly what your teammates will see.</p>
 
     {% with messages = get_flashed_messages() %}
       {% for m in messages %}<div class="flash">{{ m }}</div>{% endfor %}
     {% endwith %}
 
-    <label>Last.fm username</label>
-    <input type="text" id="lastfm" name="lastfm_username" autocomplete="off"
-           value="{{ user.lastfm_username }}" placeholder="e.g. rj" autofocus>
-    <div class="result" id="result"></div>
+    <div class="grid">
+      <!-- Left: form -->
+      <form method="post" action="{{ url_for('onboarding_lastfm') }}">
+        <label>Last.fm username</label>
+        <input type="text" id="lastfm" name="lastfm_username" autocomplete="off"
+               value="{{ user.lastfm_username }}" placeholder="e.g. rj" autofocus>
+        <div class="result" id="result"></div>
+        <p class="sub" style="margin:12px 0 0; font-size:.8rem;">
+          Your recent scrobbles must be <strong>public</strong> for us to read them.</p>
 
-    <div class="switch">
-      <input type="checkbox" name="go_live" id="go_live" checked>
-      <label for="go_live" style="margin:0">Start updating my Slack profile now</label>
+        <label for="birthday">Your birthday <span style="color:#8b90a0">(optional)</span></label>
+        <input type="date" id="birthday" name="birthday"
+               value="{% if birthday %}2000-{{ birthday }}{% endif %}"
+               style="width:100%; padding:11px 12px; border-radius:10px; border:1px solid #2b2f3d; background:#11131a; color:#e6e8ee; font-size:.95rem;">
+        <p class="sub" style="margin:6px 0 0; font-size:.78rem;">
+          We'll add a 🎂 hat + status to your profile on that day each year.</p>
+
+        <div class="switch">
+          <input type="checkbox" name="go_live" id="go_live" checked>
+          <label for="go_live" style="margin:0">Start updating my Slack profile now</label>
+        </div>
+
+        <button type="submit">Save &amp; continue</button>
+
+        <ul class="next">
+          <li>We frame your current album art onto your Slack photo.</li>
+          <li>Your status shows what you're playing, updated automatically.</li>
+          <li>Pause, tweak overlays, or delete your data anytime.</li>
+        </ul>
+      </form>
+
+      <!-- Right: live preview -->
+      <div class="preview-wrap">
+        <p class="preview-label">Live preview</p>
+        <img class="pfp" id="pfp" src="{{ url_for('onboarding_preview') }}{% if user.lastfm_username %}?username={{ user.lastfm_username|urlencode }}{% endif %}" alt="profile preview">
+        <div class="profile-row">
+          <img class="pfp-mini" id="pfpMini" src="{{ url_for('onboarding_preview') }}{% if user.lastfm_username %}?username={{ user.lastfm_username|urlencode }}{% endif %}" alt="">
+          <div>
+            <span class="pname">You<span class="pbadge"></span></span>
+            <div class="pstatus idle" id="pstatus">
+              <span class="emoji">🎵</span><span id="pstatusText">Nothing playing yet</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
-
-    <button type="submit">Save &amp; continue</button>
-  </form>
+  </div>
 
   <script>
     const input = document.getElementById('lastfm');
     const result = document.getElementById('result');
+    const pfp = document.getElementById('pfp');
+    const pfpMini = document.getElementById('pfpMini');
+    const pstatus = document.getElementById('pstatus');
+    const pstatusText = document.getElementById('pstatusText');
+    const previewBase = '{{ url_for("onboarding_preview") }}';
     let timer = null;
+
+    function setStatus(d) {
+      if (d.status === 'ok' && d.song) {
+        pstatus.classList.remove('idle');
+        const verb = d.nowplaying ? 'Now playing: ' : 'Last played: ';
+        pstatusText.textContent = verb + d.song + (d.artist ? ' — ' + d.artist : '');
+      } else {
+        pstatus.classList.add('idle');
+        pstatusText.textContent = 'Nothing playing yet';
+      }
+    }
+
+    function refreshPreview(u) {
+      const src = previewBase + '?username=' + encodeURIComponent(u) + '&t=' + Date.now();
+      pfp.classList.add('loading');
+      pfp.onload = () => pfp.classList.remove('loading');
+      pfp.src = src;
+      pfpMini.src = src;
+    }
+
     function check() {
       const u = input.value.trim();
-      if (!u) { result.textContent = ''; return; }
+      if (!u) { result.textContent = ''; setStatus({}); return; }
       result.textContent = 'Checking…'; result.className = 'result';
       fetch('{{ url_for("lastfm_validate") }}?username=' + encodeURIComponent(u))
         .then(r => r.json())
@@ -69,16 +152,21 @@
           if (d.status === 'ok') {
             result.className = 'result ok';
             result.textContent = '✓ Found — last played: ' + (d.track || 'a track');
+            setStatus(d);
+            refreshPreview(u);
           } else if (d.status === 'empty') {
             result.className = 'result warn';
             result.textContent = '⚠ Account found but no scrobbles yet.';
+            setStatus({});
           } else if (d.status === 'private') {
             result.className = 'result warn';
             result.innerHTML = '⚠ Recent listening is hidden. ' +
               '<a href="https://www.last.fm/settings/privacy" target="_blank">Make scrobbles public</a>, then retry.';
+            setStatus({});
           } else if (d.status === 'notfound') {
             result.className = 'result err';
             result.textContent = '✗ No Last.fm user with that name.';
+            setStatus({});
           } else {
             result.className = 'result err';
             result.textContent = 'Could not check right now — you can still continue.';

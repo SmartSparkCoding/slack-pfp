@@ -11,7 +11,9 @@ one with ``python -m db keygen`` and put it in ``.env``.
 """
 import json
 import os
+import re
 import sqlite3
+import tempfile
 import threading
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -34,6 +36,67 @@ ONBOARDING_STATES = (
 )
 
 _local = threading.local()
+
+
+# --------------------------------------------------------------------------- #
+# RAM-backed runtime state (now-playing) — keeps the SD card alive
+# --------------------------------------------------------------------------- #
+# The worker would otherwise write a SQLite row for every user every poll cycle
+# just to record the current track. That volatile state instead lives in tmpfs
+# (RAM): the web app reads it for the live dashboard, and it is simply
+# repopulated by the worker after a reboot. Durable data (tokens, config,
+# Last.fm username, onboarding) still lives in ``users.db`` on disk.
+
+def _runtime_state_dir() -> str:
+    """A writable RAM-backed dir (tmpfs) for volatile per-user state."""
+    for base in ("/dev/shm", tempfile.gettempdir()):
+        if os.path.isdir(base) and os.access(base, os.W_OK):
+            path = os.path.join(base, "slack-pfp-state")
+            try:
+                os.makedirs(path, exist_ok=True)
+                return path
+            except OSError:
+                continue
+    # Last resort (no tmpfs available): a local dir. Still avoids the DB churn.
+    path = os.path.join(core.BASE_DIR, ".state-cache")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+RUNTIME_STATE_DIR = _runtime_state_dir()
+
+
+def _state_file(slack_user_id: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_-]", "_", slack_user_id or "_")
+    return os.path.join(RUNTIME_STATE_DIR, f"{safe}.json")
+
+
+def load_runtime_state(slack_user_id: str) -> dict:
+    """Read a user's volatile now-playing state from RAM (``{}`` if none)."""
+    try:
+        with open(_state_file(slack_user_id)) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_runtime_state(slack_user_id: str, state: dict) -> None:
+    """Write a user's volatile state to RAM atomically (never touches the DB)."""
+    path = _state_file(slack_user_id)
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(state, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except OSError as e:
+        print(f"runtime state write failed ({slack_user_id}): {e}")
+
+
+def delete_runtime_state(slack_user_id: str) -> None:
+    try:
+        os.remove(_state_file(slack_user_id))
+    except OSError:
+        pass
 
 
 # --------------------------------------------------------------------------- #
@@ -217,6 +280,7 @@ def delete_user(slack_user_id: str, path: str | None = None) -> bool:
     conn = _connect(path)
     cur = conn.execute("DELETE FROM users WHERE slack_user_id = ?", (slack_user_id,))
     conn.commit()
+    delete_runtime_state(slack_user_id)
     return cur.rowcount > 0
 
 
