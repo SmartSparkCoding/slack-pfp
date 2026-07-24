@@ -6,6 +6,7 @@ users.db-shm
 emoji_cache.json
 config.json
 state.json
+player_links.json
 .cache
 
 # Per-user uploaded overlays
