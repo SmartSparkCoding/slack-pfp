@@ -1,12 +1,8 @@
 """Multi-user Slack profile updater loop.
 
-A single shared loop iterates every active user, throttled to stay under
-Last.fm's ~5 requests/second limit. For each user it polls their now-playing
-track (using the shared app key + their public username) and updates their Slack
-photo (framed album art) and status via their own per-user token.
-
-Per-user settings/state live in SQLite (``db.py``). Repeated Slack auth failures
-disable a user (token revoked) until they re-connect via the dashboard.
+A single shared loop iterates every active user and asks the configured
+now-playing plugin for normalized track data. Last.fm remains the default
+fallback, while linked CLI/self-hosted players can override it in auto mode.
 """
 import os
 import time
@@ -18,6 +14,8 @@ from slack_sdk.errors import SlackApiError
 
 import core
 import db
+import linked_player
+import player_plugins
 
 FRAME_PATH = os.path.join(core.ASSETS_DIR, "frame.png")
 DEFAULT_PFP = os.path.join(core.ASSETS_DIR, "pfp.png")
@@ -95,18 +93,20 @@ def set_photo(client, user, album_url):
         image=core.prepare_image_for_slack(final_img)))
 
 
-def write_state(user, playing, song, artist, album, album_art, lastfm_status=""):
+def write_state(user, playing, song, artist, album, album_art, source="", source_status="ok"):
     user.state.update({
         "playing": playing,
         "song": song,
         "artist": artist,
         "album": album,
         "album_art": album_art,
-        "lastfm_status": lastfm_status,
+        "player_source": source,
+        "player_status": source_status,
+        # Keep this legacy key for existing dashboard/status code.
+        "lastfm_status": source_status,
         "active_holidays": [h["id"] for h in core.active_holidays(user.config)],
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
-    # Volatile now-playing state goes to RAM (tmpfs), not the SD card.
     db.save_runtime_state(user.slack_user_id, user.state)
 
 
@@ -116,6 +116,9 @@ def process_user(user: db.User, api_key: str):
     cfg = user.config
     client = WebClient(token=user.slack_token)
 
+    # Merge fresh linked-player state into the durable user object loaded by db.
+    user.state.update(db.load_runtime_state(user.slack_user_id))
+
     # Force a re-render if the user changed their config.
     config_sig = repr(cfg)
     if config_sig != rt["last_config_sig"]:
@@ -123,24 +126,30 @@ def process_user(user: db.User, api_key: str):
         rt["last_photo_key"] = None
         rt["last_config_sig"] = config_sig
 
-    track_id, song, artist, album, album_art = core.get_current_track(
-        api_key, user.lastfm_username)
-    playing = bool(track_id and song and artist)
+    result = player_plugins.poll_user(user, api_key)
+    track = result.track if result else None
+    source = result.source if result else ""
+    source_status = result.status if result else "not_configured"
+    playing = bool(track)
+    song = track.song if track else None
+    artist = track.artist if track else None
+    album = track.album if track else None
+    album_art = track.album_art if track else None
 
     try:
         if playing:
             rt["not_playing_since"] = None
-            write_state(user, True, song, artist, album, album_art, "ok")
+            write_state(user, True, song, artist, album, album_art, source, source_status)
             text, emoji = status_for(cfg, True, song, artist, album, "")
             if (text, emoji) != rt["last_status"] and set_status(client, text, emoji):
                 rt["last_status"] = (text, emoji)
-            photo_key = ("track", track_id)
+            photo_key = (source, track.track_id)
             if photo_key != rt["last_photo_key"]:
-                print(f"[{user.slack_user_id}] Now playing: {song} by {artist}")
+                print(f"[{user.slack_user_id}] {source}: {song} by {artist}")
                 if set_photo(client, user, album_art):
                     rt["last_photo_key"] = photo_key
         else:
-            write_state(user, False, None, None, None, None, "ok")
+            write_state(user, False, None, None, None, None, source, source_status)
             if rt["not_playing_since"] is None:
                 rt["not_playing_since"] = time.time()
             elif time.time() - rt["not_playing_since"] >= cfg.get("restore_delay", 30):
@@ -160,7 +169,7 @@ def process_user(user: db.User, api_key: str):
             user.onboarding = "disconnected"
             user.state["lastfm_status"] = "slack_disconnected"
             db.save_user(user)
-            db.delete_runtime_state(user.slack_user_id)  # drop stale now-playing
+            db.delete_runtime_state(user.slack_user_id)
             print(f"[{user.slack_user_id}] disabled (token revoked)")
         return False
 
@@ -168,9 +177,8 @@ def process_user(user: db.User, api_key: str):
 def main():
     load_dotenv(os.path.join(core.BASE_DIR, ".env"))
     db.init_db()
-    api_key = os.getenv("LASTFM_API_KEY")
-    if not api_key:
-        raise SystemExit("LASTFM_API_KEY must be set in .env")
+    api_key = os.getenv("LASTFM_API_KEY", "")
+    linked_player.start_server()
 
     print("Starting multi-user Slack profile updater...")
     last_lastfm_call = 0.0
@@ -178,13 +186,15 @@ def main():
     while True:
         cycle_start = time.time()
         users = [u for u in db.all_users()
-                 if u.onboarding == "active" and u.slack_token and u.lastfm_username]
+                 if u.onboarding == "active" and u.slack_token
+                 and player_plugins.user_is_ready(u, api_key)]
         if not users:
             time.sleep(min(CYCLE_SECONDS, 10))
             continue
 
         for user in users:
-            # Throttle Last.fm requests to stay under the per-key rate limit.
+            # Auto/Last.fm may call the shared API. Keep the existing conservative
+            # throttle; linked-only sources simply incur a tiny harmless delay.
             wait = _MIN_LASTFM_INTERVAL - (time.time() - last_lastfm_call)
             if wait > 0:
                 time.sleep(wait)
@@ -195,9 +205,7 @@ def main():
                 print(f"[{user.slack_user_id}] processing error: {e}")
 
         elapsed = time.time() - cycle_start
-        headroom = LASTFM_MAX_RPS * elapsed - len(users)
-        print(f"Cycle: {len(users)} users in {elapsed:.1f}s "
-              f"(Last.fm headroom ~{headroom:.0f} req)")
+        print(f"Cycle: {len(users)} users in {elapsed:.1f}s")
         if elapsed < CYCLE_SECONDS:
             time.sleep(CYCLE_SECONDS - elapsed)
 
