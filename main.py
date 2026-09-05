@@ -50,7 +50,8 @@ def status_for(cfg, playing, song, artist, album, default_status):
     for h in holidays:
         if h.get("status_text"):
             return h["status_text"], h.get("status_emoji", "")
-    text, emoji = core.school_status(cfg, playing, song, artist, album)
+    text, emoji = core.school_status(
+        cfg, playing and cfg.get("show_status", True), song, artist, album)
     if text is not None:
         return text, emoji
     if playing and cfg.get("show_status", True):

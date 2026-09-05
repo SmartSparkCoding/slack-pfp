@@ -17,7 +17,7 @@ positioned per-user with a drag-and-drop canvas editor.
 
 School mode (dashboard → "School mode") switches your Slack status to an OOO
 message on your school days during your school hours. Pick the days + time
-window, the status message/emoji (with an optional auto-response fallback), and
+window, the status message/emoji (with an optional fallback message), and
 how a playing track mixes in. School holidays (date ranges) skip school mode
 entirely and restore your normal status.
 - **`main.py`** — shared worker loop: iterates active users, throttled to stay

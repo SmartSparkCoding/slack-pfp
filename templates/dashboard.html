@@ -181,7 +181,7 @@
           <input type="text" name="status_text" value="{{ cfg.school.status_text }}" placeholder="e.g. in school, brb">
           <label>Status emoji</label>
           <input type="text" name="status_emoji" value="{{ cfg.school.status_emoji }}" placeholder=":mortar_board:" data-emoji>
-          <label>Auto-response <span class="meta">— used when the status message is left blank</span></label>
+          <label>Fallback message <span class="meta">— optional; used only if the status message is blank. This is not an automatic Slack reply.</span></label>
           <input type="text" name="auto_reply" value="{{ cfg.school.auto_reply }}" placeholder="e.g. I'll reply after school">
           <label>While playing music</label>
           <select name="music_behavior">
