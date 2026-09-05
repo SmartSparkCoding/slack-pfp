@@ -83,6 +83,9 @@
           {% if state.active_holidays %}
             <div class="muted">Active: {{ state.active_holidays | join(', ') }}</div>
           {% endif %}
+          {% if state.school_active %}
+            <div class="muted" style="color:#7fe0a3;">🏫 School mode is active</div>
+          {% endif %}
           {% if state.updated_at %}<div class="muted">Updated {{ state.updated_at }}</div>{% endif %}
         </div>
       </div>
@@ -150,6 +153,76 @@
             <button class="ghost" type="submit" style="padding:6px 10px; font-size:.78rem;">Refresh emojis</button>
           </form>
         </div>
+      </div>
+
+      <div class="card">
+        <h2>School mode</h2>
+        <div class="meta" style="margin:-8px 0 8px;">While you're in class your Slack status switches to an OOO message. Add school holidays to skip school mode entirely on those days.</div>
+        <form method="post" action="{{ url_for('update_school') }}">
+          <div class="switch">
+            <input type="checkbox" name="school_enabled" {% if cfg.school.enabled %}checked{% endif %}>
+            <span>Enable school mode</span>
+          </div>
+          <label>School days</label>
+          <div class="row" style="flex-wrap:wrap;">
+            {% for day, name in [('0','Mon'),('1','Tue'),('2','Wed'),('3','Thu'),('4','Fri'),('5','Sat'),('6','Sun')] %}
+            <label style="flex:0 0 auto; display:flex; align-items:center; gap:6px; margin-bottom:6px;">
+              <input type="checkbox" name="days" value="{{ day }}" style="width:auto;"
+                     {% if day | int in cfg.school.days %}checked{% endif %}>
+              <span>{{ name }}</span>
+            </label>
+            {% endfor %}
+          </div>
+          <div class="row">
+            <div><label>School starts</label><input type="time" name="start" value="{{ cfg.school.start }}"></div>
+            <div><label>School ends</label><input type="time" name="end" value="{{ cfg.school.end }}"></div>
+          </div>
+          <label>Status message <span class="meta">— shown while OOO</span></label>
+          <input type="text" name="status_text" value="{{ cfg.school.status_text }}" placeholder="e.g. in school, brb">
+          <label>Status emoji</label>
+          <input type="text" name="status_emoji" value="{{ cfg.school.status_emoji }}" placeholder=":mortar_board:" data-emoji>
+          <label>Auto-response <span class="meta">— used when the status message is left blank</span></label>
+          <input type="text" name="auto_reply" value="{{ cfg.school.auto_reply }}" placeholder="e.g. I'll reply after school">
+          <label>While playing music</label>
+          <select name="music_behavior">
+            <option value="music_over" {% if cfg.school.music_behavior == 'music_over' %}selected{% endif %}>Show music status instead of school status</option>
+            <option value="music_school" {% if cfg.school.music_behavior == 'music_school' %}selected{% endif %}>Show music, then school message</option>
+            <option value="school_music" {% if cfg.school.music_behavior == 'school_music' %}selected{% endif %}>Show school message, then music</option>
+            <option value="listening" {% if cfg.school.music_behavior == 'listening' %}selected{% endif %}>Show "&lt;school message&gt; - Listening to Music"</option>
+          </select>
+          <div style="margin-top:18px"><button type="submit">Save school mode</button></div>
+        </form>
+
+        <div style="margin-top:14px; border-top:1px solid #232838; padding-top:14px;">
+          <div style="display:flex; gap:8px; align-items:center; justify-content:space-between;">
+            <span style="font-size:.82rem;">School holidays</span>
+            <span class="meta">— normal status, no matter the day</span>
+          </div>
+          {% for sh in cfg.school.holidays %}
+          <div class="item">
+            <div>
+              <strong>{{ sh.name }}</strong>
+              <div class="meta">{{ sh.start }} → {{ sh.end }}</div>
+            </div>
+            <form class="inline" method="post" action="{{ url_for('delete_school_holiday', hid=sh.id) }}">
+              <button class="danger" type="submit">Delete</button>
+            </form>
+          </div>
+          {% else %}
+          <div class="meta" style="margin:10px 0">No school holidays yet.</div>
+          {% endfor %}
+        </div>
+
+        <form method="post" action="{{ url_for('add_school_holiday') }}" style="margin-top:10px;">
+          <div class="row">
+            <div><label>Holiday name</label><input type="text" name="name" placeholder="e.g. Spring break"></div>
+          </div>
+          <div class="row">
+            <div><label>From</label><input type="date" name="start" required></div>
+            <div><label>To</label><input type="date" name="end" required></div>
+          </div>
+          <div style="margin-top:14px"><button type="submit">Add school holiday</button></div>
+        </form>
       </div>
 
       <div class="card">

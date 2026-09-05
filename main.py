@@ -50,6 +50,9 @@ def status_for(cfg, playing, song, artist, album, default_status):
     for h in holidays:
         if h.get("status_text"):
             return h["status_text"], h.get("status_emoji", "")
+    text, emoji = core.school_status(cfg, playing, song, artist, album)
+    if text is not None:
+        return text, emoji
     if playing and cfg.get("show_status", True):
         fmt = cfg.get("status_format", "{song} - {artist}")
         return core.format_status(fmt, song, artist, album), cfg.get("status_emoji", ":musical_note:")
@@ -104,6 +107,7 @@ def write_state(user, playing, song, artist, album, album_art, lastfm_status="")
         "album_art": album_art,
         "lastfm_status": lastfm_status,
         "active_holidays": [h["id"] for h in core.active_holidays(user.config)],
+        "school_active": core.is_school_time(user.config),
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     })
     # Volatile now-playing state goes to RAM (tmpfs), not the SD card.

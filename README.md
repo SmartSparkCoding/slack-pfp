@@ -13,7 +13,13 @@ positioned per-user with a drag-and-drop canvas editor.
 ## Architecture
 
 - **`app.py`** — Flask web app: Slack OAuth login, per-user dashboard, onboarding,
-  account management, overlay editor, live preview, `/healthz`.
+  account management, overlay editor, school-mode OOO settings, live preview, `/healthz`.
+
+School mode (dashboard → "School mode") switches your Slack status to an OOO
+message on your school days during your school hours. Pick the days + time
+window, the status message/emoji (with an optional auto-response fallback), and
+how a playing track mixes in. School holidays (date ranges) skip school mode
+entirely and restore your normal status.
 - **`main.py`** — shared worker loop: iterates active users, throttled to stay
   under Last.fm's rate limit, updating each user's Slack photo + status via their
   own token. Disables users whose tokens are revoked.

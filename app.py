@@ -8,6 +8,7 @@ pipeline in ``core.py`` is unchanged.
 import os
 import shutil
 import uuid
+from copy import deepcopy
 from functools import wraps
 from io import BytesIO
 
@@ -336,6 +337,64 @@ def update_settings():
         pass
     save(user)
     flash("Settings saved")
+    return redirect(url_for("dashboard"))
+
+
+# --------------------------------------------------------------------------- #
+# School mode (OOO while in class)
+# --------------------------------------------------------------------------- #
+
+def _school(user: db.User) -> dict:
+    return user.config.setdefault("school", deepcopy(core.DEFAULT_CONFIG["school"]))
+
+
+@app.route("/api/school", methods=["POST"])
+@login_required
+def update_school():
+    user = current_user()
+    school = _school(user)
+    school["enabled"] = request.form.get("school_enabled") == "on"
+    school["days"] = sorted(int(d) for d in request.form.getlist("days")
+                            if d.isdigit() and 0 <= int(d) <= 6)
+    school["start"] = request.form.get("start", school.get("start", "")).strip()
+    school["end"] = request.form.get("end", school.get("end", "")).strip()
+    school["status_text"] = request.form.get("status_text", "").strip()
+    school["status_emoji"] = request.form.get("status_emoji", "").strip()
+    school["auto_reply"] = request.form.get("auto_reply", "").strip()
+    behavior = request.form.get("music_behavior", "music_over").strip()
+    school["music_behavior"] = behavior if behavior in core.SCHOOL_BEHAVIORS else "music_over"
+    school.setdefault("holidays", [])
+    save(user)
+    flash("School mode saved")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/api/school/holiday/add", methods=["POST"])
+@login_required
+def add_school_holiday():
+    user = current_user()
+    school = _school(user)
+    name = request.form.get("name", "").strip() or "School holiday"
+    school.setdefault("holidays", []).append({
+        "id": uuid.uuid4().hex[:8],
+        "name": name,
+        "start": request.form.get("start", "").strip(),
+        "end": request.form.get("end", "").strip(),
+    })
+    save(user)
+    flash(f"School holiday '{name}' added")
+    return redirect(url_for("dashboard"))
+
+
+@app.route("/api/school/holiday/<hid>/delete", methods=["POST"])
+@login_required
+def delete_school_holiday(hid):
+    user = current_user()
+    _school(user)["holidays"] = [
+        h for h in _school(user).get("holidays", []) if h.get("id") != hid
+    ]
+    save(user)
+    flash("School holiday deleted")
     return redirect(url_for("dashboard"))
 
 
